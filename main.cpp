@@ -10,6 +10,8 @@
 
 using namespace std;
 
+#pragma pack(push, 1)
+
 typedef struct {
     u_char dMac[6];
     u_char sMac[6];
@@ -34,6 +36,8 @@ typedef struct {
     u_char gip[4];
     u_char vmac[6];
 } myInfo;
+
+#pragma pack(pop)
 
 pcap_t *handle;
 
